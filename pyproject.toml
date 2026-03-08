@@ -1,0 +1,7 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [".pytest_cache", "__pycache__", "test.db"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
