@@ -245,50 +245,6 @@ docker compose up --build
 - Redis
 - отдельный `worker` контейнер
 
-## Demo
-
-Ниже минимальный сценарий, который можно быстро показать в README или на созвоне.
-
-1. Проверить, что сервис и очередь поднялись:
-
-```bash
-curl http://localhost:8000/health
-```
-
-2. Отправить webhook в сервис:
-
-```bash
-curl -X POST http://localhost:8000/webhook \
-  -H "Content-Type: application/json" \
-  -H "X-Webhook-ID: delivery-123" \
-  -d '{
-    "source": "telegram_bot",
-    "event_type": "user_registered",
-    "payload": {"user_id": 123, "username": "john_doe"}
-  }'
-```
-
-3. Проверить, что событие появилось в operational API:
-
-```bash
-curl -X GET "http://localhost:8000/events?limit=10&offset=0" \
-  -H "X-API-KEY: supersecret"
-```
-
-4. Посмотреть сводку по обработке:
-
-```bash
-curl -X GET http://localhost:8000/events/summary \
-  -H "X-API-KEY: supersecret"
-```
-
-5. При необходимости переотправить failed event:
-
-```bash
-curl -X POST http://localhost:8000/events/<event_id>/retry \
-  -H "X-API-KEY: supersecret"
-```
-
 ## Проверка качества
 
 ```bash
@@ -298,7 +254,7 @@ python -m pytest -q
 
 CI автоматически запускает lint и тесты с coverage report в GitHub Actions.
 
-## Design Choices and Trade-offs
+## Заметки
 
 - Docker-стенд использует Redis queue и отдельный worker, чтобы отделить прием webhook от обработки и показать более реалистичную интеграционную схему.
 - Для упрощенного локального режима остается `inline` backend без Redis, чтобы проект можно было запускать даже без инфраструктурных зависимостей.
