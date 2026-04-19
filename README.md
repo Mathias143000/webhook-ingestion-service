@@ -1,5 +1,19 @@
 # Webhook Ingestion Service
 
+## Portfolio Role
+
+This repository is the event-driven workload showcase in the platform portfolio.
+
+Use it when the review should focus on:
+
+- webhook intake and signed ingress
+- idempotency by delivery ID
+- queue-backed async processing
+- retry and operational replay paths
+- a realistic integration workload for the larger platform labs
+
+In the overall portfolio this project is a workload companion, not the primary platform flagship. It shows the kind of asynchronous failure modes that a platform team needs to expose, observe, and recover.
+
 Асинхронный сервис приема webhook-событий на FastAPI и async SQLAlchemy.
 
 Проект сфокусирован на типовом интеграционном сценарии: прием внешних событий, проверка подписи, идемпотентность, Redis-backed очередь, отдельный worker и operational endpoints.
