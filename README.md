@@ -192,10 +192,12 @@ This repository currently meets its portfolio `Definition of Done`:
 - there is no outbox pattern yet between DB commit and broker publish
 - no `k6` load generator or chaos drill is implemented yet
 
-## Future Improvements
+## Explicit Non-Goals
 
 - add `Loki` for log search and retention
 - add explicit outbox/inbox pattern discussion and implementation
 - add `k6` load drills
 - add failure-injection tooling for broker and worker outages
 - add partner-specific contract fixtures and replay tooling
+
+These are intentionally out of scope for the current event-driven workload DoD. The repo is complete as a webhook intake, retry, DLQ, replay, observability, and hardening showcase.
