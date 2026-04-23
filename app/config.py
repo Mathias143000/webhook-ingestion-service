@@ -15,11 +15,24 @@ class Settings(BaseSettings):
 
     app_name: str = Field(default="webhook-ingestion-service", alias="APP_NAME")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    json_logs: bool = Field(default=True, alias="JSON_LOGS")
     auto_create_tables: bool = Field(default=True, alias="AUTO_CREATE_TABLES")
     task_queue_backend: str = Field(default="inline", alias="TASK_QUEUE_BACKEND")
     redis_url: str = Field(default="redis://redis:6379/0", alias="REDIS_URL")
+    rabbitmq_url: str = Field(default="amqp://guest:guest@rabbitmq:5672/", alias="RABBITMQ_URL")
     event_queue_name: str = Field(default="webhook-events", alias="EVENT_QUEUE_NAME")
+    retry_queue_name: str = Field(default="webhook-events.retry", alias="RETRY_QUEUE_NAME")
+    dead_letter_queue_name: str = Field(
+        default="webhook-events.dlq",
+        alias="DEAD_LETTER_QUEUE_NAME",
+    )
     worker_poll_timeout_seconds: int = Field(default=5, alias="WORKER_POLL_TIMEOUT_SECONDS")
+    rabbitmq_exchange_name: str = Field(default="webhooks", alias="RABBITMQ_EXCHANGE_NAME")
+    rabbitmq_retry_delay_ms: int = Field(default=5000, alias="RABBITMQ_RETRY_DELAY_MS")
+    rabbitmq_max_delivery_attempts: int = Field(
+        default=3,
+        alias="RABBITMQ_MAX_DELIVERY_ATTEMPTS",
+    )
     webhook_secret: str = Field(default="", alias="WEBHOOK_SECRET")
     webhook_signature_header: str = Field(
         default="X-Webhook-Signature",
@@ -34,6 +47,16 @@ class Settings(BaseSettings):
         default=300,
         alias="WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS",
     )
+    request_id_header: str = Field(default="X-Request-ID", alias="REQUEST_ID_HEADER")
+    tracing_enabled: bool = Field(default=False, alias="TRACING_ENABLED")
+    otel_service_name: str = Field(
+        default="webhook-ingestion-service",
+        alias="OTEL_SERVICE_NAME",
+    )
+    otel_exporter_otlp_endpoint: str = Field(
+        default="http://otel-collector:4318",
+        alias="OTEL_EXPORTER_OTLP_ENDPOINT",
+    )
 
     @field_validator("log_level")
     @classmethod
@@ -44,8 +67,8 @@ class Settings(BaseSettings):
     @classmethod
     def validate_task_queue_backend(cls, value: str) -> str:
         normalized = value.lower()
-        if normalized not in {"inline", "redis"}:
-            raise ValueError("TASK_QUEUE_BACKEND must be either 'inline' or 'redis'")
+        if normalized not in {"inline", "redis", "rabbitmq"}:
+            raise ValueError("TASK_QUEUE_BACKEND must be 'inline', 'redis', or 'rabbitmq'")
         return normalized
 
     @field_validator("worker_poll_timeout_seconds")
@@ -53,6 +76,13 @@ class Settings(BaseSettings):
     def validate_worker_poll_timeout_seconds(cls, value: int) -> int:
         if value < 1:
             raise ValueError("WORKER_POLL_TIMEOUT_SECONDS must be greater than or equal to 1")
+        return value
+
+    @field_validator("rabbitmq_retry_delay_ms", "rabbitmq_max_delivery_attempts")
+    @classmethod
+    def validate_positive_numbers(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Queue retry settings must be positive integers")
         return value
 
 

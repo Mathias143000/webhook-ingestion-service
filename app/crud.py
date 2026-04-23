@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Event
@@ -12,12 +12,14 @@ async def create_event(
     session: AsyncSession,
     *,
     delivery_id: str | None,
+    request_id: str | None,
     source: str,
     event_type: str,
     payload: dict,
 ) -> Event:
     event = Event(
         delivery_id=delivery_id,
+        request_id=request_id,
         source=source,
         event_type=event_type,
         payload=payload,
@@ -81,3 +83,25 @@ async def get_events_summary(session: AsyncSession) -> dict[str, object]:
         "failed": status_counts.get(Event.ProcessingStatus.FAILED, 0),
         "by_source": source_counts,
     }
+
+
+async def mark_events_pending(
+    session: AsyncSession,
+    *,
+    event_ids: list,
+) -> None:
+    if not event_ids:
+        return
+
+    stmt = (
+        update(Event)
+        .where(Event.id.in_(event_ids))
+        .where(Event.processing_status != Event.ProcessingStatus.PROCESSED)
+        .values(
+            processing_status=Event.ProcessingStatus.PENDING,
+            error_message=None,
+            processed_at=None,
+        )
+    )
+    await session.execute(stmt)
+    await session.commit()

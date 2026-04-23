@@ -13,7 +13,7 @@ async def test_health_ok(client):
         "queue": "disabled",
         "queue_depth": None,
         "queue_backend": "inline",
-        "version": "1.2.0",
+        "version": "2.0.0",
     }
 
 

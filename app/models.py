@@ -25,6 +25,7 @@ class Event(Base):
     delivery_id: Mapped[str | None] = mapped_column(
         String(128), unique=True, index=True, nullable=True
     )
+    request_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
     source: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
     event_type: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
 

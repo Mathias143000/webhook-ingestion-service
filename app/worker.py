@@ -5,7 +5,13 @@ import asyncio
 from .config import settings
 from .db import dispose_db
 from .logging_config import get_logger, setup_logging
-from .queue import dequeue_event, dispose_queue, is_queue_enabled
+from .queue import (
+    complete_event,
+    dequeue_event,
+    dispose_queue,
+    is_queue_enabled,
+    retry_or_dead_letter,
+)
 from .services.processor import process_event_by_id
 
 logger = get_logger(__name__)
@@ -17,11 +23,21 @@ async def run_worker() -> None:
 
     logger.info("Worker started | queue=%s", settings.event_queue_name)
     while True:
-        event_id = await dequeue_event(timeout_seconds=settings.worker_poll_timeout_seconds)
-        if event_id is None:
+        envelope = await dequeue_event(timeout_seconds=settings.worker_poll_timeout_seconds)
+        if envelope is None:
             continue
-        logger.info("Worker picked event | event_id=%s", event_id)
-        await process_event_by_id(event_id)
+        logger.info(
+            "Worker picked event | event_id=%s attempt=%s",
+            envelope.event_id,
+            envelope.attempt,
+        )
+        final_attempt = envelope.attempt >= settings.rabbitmq_max_delivery_attempts
+        processed = await process_event_by_id(envelope.event_id, final_attempt=final_attempt)
+        if processed:
+            await complete_event(envelope)
+            continue
+        action = await retry_or_dead_letter(envelope)
+        logger.info("Worker routed failed event | event_id=%s action=%s", envelope.event_id, action)
 
 
 async def _main() -> None:

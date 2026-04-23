@@ -33,6 +33,7 @@ class EventOut(BaseModel):
 
     id: uuid.UUID
     delivery_id: str | None = None
+    request_id: str | None = None
     source: str
     event_type: str
     payload: Dict[str, Any]
@@ -55,6 +56,8 @@ class EventsSummaryOut(BaseModel):
     processed: int
     failed: int
     queue_depth: int | None = None
+    retry_depth: int | None = None
+    dead_letter_depth: int | None = None
     by_source: dict[str, int]
 
 
@@ -68,3 +71,13 @@ class QueueStatsOut(BaseModel):
     enabled: bool
     queue_name: str | None = None
     depth: int | None = None
+    retry_queue_name: str | None = None
+    retry_depth: int | None = None
+    dead_letter_queue_name: str | None = None
+    dead_letter_depth: int | None = None
+
+
+class DLQRedriveOut(BaseModel):
+    status: str = "redrive_scheduled"
+    redriven_count: int
+    event_ids: list[uuid.UUID]

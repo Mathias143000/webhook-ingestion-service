@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import time
+import uuid
 
 import pytest
 
@@ -9,6 +10,7 @@ import app.routers.webhooks as webhooks_module
 from app.config import settings
 from app.db import AsyncSessionLocal
 from app.models import Event
+from app.schemas import DLQRedriveOut
 
 VALID_PAYLOAD = {
     "source": "telegram_bot",
@@ -218,6 +220,8 @@ async def test_events_summary_returns_aggregates(client):
     assert payload["processed"] == 2
     assert payload["failed"] == 0
     assert payload["queue_depth"] is None
+    assert payload["retry_depth"] is None
+    assert payload["dead_letter_depth"] is None
     assert payload["by_source"] == {"stripe": 1, "telegram_bot": 1}
 
 
@@ -230,6 +234,10 @@ async def test_queue_stats_returns_disabled_in_inline_mode(client):
         "enabled": False,
         "queue_name": None,
         "depth": None,
+        "retry_queue_name": None,
+        "retry_depth": None,
+        "dead_letter_queue_name": None,
+        "dead_letter_depth": None,
     }
 
 
@@ -239,10 +247,15 @@ async def test_queue_stats_returns_depth_when_redis_backend_enabled(client, monk
     settings.task_queue_backend = "redis"
     monkeypatch.setattr(webhooks_module, "is_queue_enabled", lambda: True)
 
-    async def _depth():
-        return 3
+    class _Snapshot:
+        main_depth = 3
+        retry_depth = 1
+        dead_letter_depth = 2
 
-    monkeypatch.setattr(webhooks_module, "_get_queue_depth_or_none", _depth)
+    async def _snapshot():
+        return _Snapshot()
+
+    monkeypatch.setattr(webhooks_module, "_get_queue_snapshot_or_raise", _snapshot)
 
     try:
         response = await client.get("/queue/stats")
@@ -252,6 +265,32 @@ async def test_queue_stats_returns_depth_when_redis_backend_enabled(client, monk
             "enabled": True,
             "queue_name": settings.event_queue_name,
             "depth": 3,
+            "retry_queue_name": None,
+            "retry_depth": 1,
+            "dead_letter_queue_name": None,
+            "dead_letter_depth": 2,
         }
+    finally:
+        settings.task_queue_backend = old_backend
+
+
+@pytest.mark.asyncio
+async def test_dlq_redrive_endpoint_returns_event_ids(client, monkeypatch):
+    old_backend = settings.task_queue_backend
+    settings.task_queue_backend = "rabbitmq"
+
+    async def _redrive(limit: int):
+        assert limit == 5
+        return [uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")]
+
+    monkeypatch.setattr(webhooks_module, "redrive_dead_letter", _redrive)
+
+    try:
+        response = await client.post("/queue/dlq/redrive?limit=5")
+        assert response.status_code == 202
+        assert response.json() == DLQRedriveOut(
+            redriven_count=1,
+            event_ids=[uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")],
+        ).model_dump(mode="json")
     finally:
         settings.task_queue_backend = old_backend

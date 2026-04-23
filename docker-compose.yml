@@ -1,3 +1,5 @@
+name: webhook-ingestion-service
+
 services:
   db:
     image: postgres:16-alpine
@@ -8,13 +10,11 @@ services:
       POSTGRES_PASSWORD: postgres
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d webhooks"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   redis:
     image: redis:7-alpine
@@ -24,7 +24,20 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    ports:
+      - "15692:15672"
+    volumes:
+      - ./rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   app:
     build: .
@@ -33,19 +46,41 @@ services:
       - .env
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@db:5432/webhooks}
-      API_KEY: ${API_KEY:-}
+      API_KEY: ${API_KEY:-supersecret}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      JSON_LOGS: ${JSON_LOGS:-true}
       AUTO_CREATE_TABLES: ${AUTO_CREATE_TABLES:-true}
-      TASK_QUEUE_BACKEND: ${TASK_QUEUE_BACKEND:-redis}
+      TASK_QUEUE_BACKEND: ${TASK_QUEUE_BACKEND:-rabbitmq}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672/}
       EVENT_QUEUE_NAME: ${EVENT_QUEUE_NAME:-webhook-events}
+      RETRY_QUEUE_NAME: ${RETRY_QUEUE_NAME:-webhook-events.retry}
+      DEAD_LETTER_QUEUE_NAME: ${DEAD_LETTER_QUEUE_NAME:-webhook-events.dlq}
+      RABBITMQ_MAX_DELIVERY_ATTEMPTS: ${RABBITMQ_MAX_DELIVERY_ATTEMPTS:-3}
+      RABBITMQ_RETRY_DELAY_MS: ${RABBITMQ_RETRY_DELAY_MS:-5000}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-topsecret}
+      WEBHOOK_SIGNATURE_HEADER: ${WEBHOOK_SIGNATURE_HEADER:-X-Webhook-Signature}
+      WEBHOOK_TIMESTAMP_HEADER: ${WEBHOOK_TIMESTAMP_HEADER:-X-Webhook-Timestamp}
+      WEBHOOK_ID_HEADER: ${WEBHOOK_ID_HEADER:-X-Webhook-ID}
+      WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS: ${WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS:-300}
+      REQUEST_ID_HEADER: ${REQUEST_ID_HEADER:-X-Request-ID}
+      TRACING_ENABLED: ${TRACING_ENABLED:-true}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-webhook-ingestion-service}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
-    ports:
-      - "8000:8000"
+      rabbitmq:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
 
   worker:
     build: .
@@ -56,16 +91,115 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@db:5432/webhooks}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      JSON_LOGS: ${JSON_LOGS:-true}
       AUTO_CREATE_TABLES: ${AUTO_CREATE_TABLES:-true}
-      TASK_QUEUE_BACKEND: ${TASK_QUEUE_BACKEND:-redis}
+      TASK_QUEUE_BACKEND: ${TASK_QUEUE_BACKEND:-rabbitmq}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672/}
       EVENT_QUEUE_NAME: ${EVENT_QUEUE_NAME:-webhook-events}
+      RETRY_QUEUE_NAME: ${RETRY_QUEUE_NAME:-webhook-events.retry}
+      DEAD_LETTER_QUEUE_NAME: ${DEAD_LETTER_QUEUE_NAME:-webhook-events.dlq}
+      RABBITMQ_MAX_DELIVERY_ATTEMPTS: ${RABBITMQ_MAX_DELIVERY_ATTEMPTS:-3}
+      RABBITMQ_RETRY_DELAY_MS: ${RABBITMQ_RETRY_DELAY_MS:-5000}
       WORKER_POLL_TIMEOUT_SECONDS: ${WORKER_POLL_TIMEOUT_SECONDS:-5}
+      TRACING_ENABLED: ${TRACING_ENABLED:-true}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-webhook-ingestion-service-worker}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import asyncio, sys; from app.db import ping_db; from app.queue import ping_queue; sys.exit(0 if asyncio.run(ping_db()) and asyncio.run(ping_queue()) else 1)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "18180:8080"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+
+  prometheus:
+    image: prom/prometheus:v3.4.2
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "19190:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    restart: unless-stopped
+    ports:
+      - "19193:9093"
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --cluster.listen-address=
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+
+  grafana:
+    image: grafana/grafana-oss:11.5.2
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_started
+      alertmanager:
+        condition: service_started
+      tempo:
+        condition: service_started
+    ports:
+      - "13150:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin12345
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.123.0
+    restart: unless-stopped
+    command: ["--config=/etc/otel-collector/config.yml"]
+    volumes:
+      - ./otel-collector/config.yml:/etc/otel-collector/config.yml:ro
+
+  tempo:
+    image: grafana/tempo:2.7.2
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo/config.yml"]
+    ports:
+      - "13221:3200"
+    volumes:
+      - ./tempo/config.yml:/etc/tempo/config.yml:ro
 
 volumes:
   pgdata:

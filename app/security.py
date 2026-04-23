@@ -7,6 +7,7 @@ import time
 from fastapi import HTTPException, status
 
 from .config import settings
+from .metrics import record_signature_failure
 
 
 def verify_webhook_signature(*, body: bytes, timestamp: str | None, signature: str | None) -> None:
@@ -14,6 +15,7 @@ def verify_webhook_signature(*, body: bytes, timestamp: str | None, signature: s
         return
 
     if not timestamp or not signature:
+        record_signature_failure()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing webhook signature headers",
@@ -22,6 +24,7 @@ def verify_webhook_signature(*, body: bytes, timestamp: str | None, signature: s
     try:
         timestamp_value = int(timestamp)
     except ValueError as exc:
+        record_signature_failure()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid webhook timestamp",
@@ -29,6 +32,7 @@ def verify_webhook_signature(*, body: bytes, timestamp: str | None, signature: s
 
     now = int(time.time())
     if abs(now - timestamp_value) > settings.webhook_timestamp_tolerance_seconds:
+        record_signature_failure()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Webhook timestamp is outside the allowed tolerance window",
@@ -42,6 +46,7 @@ def verify_webhook_signature(*, body: bytes, timestamp: str | None, signature: s
     ).hexdigest()
 
     if not hmac.compare_digest(signature, expected_signature):
+        record_signature_failure()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid webhook signature",

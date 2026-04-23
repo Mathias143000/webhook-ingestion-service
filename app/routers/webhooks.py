@@ -20,8 +20,16 @@ from .. import crud
 from ..config import settings
 from ..db import get_session
 from ..logging_config import get_logger
-from ..queue import QueueUnavailableError, enqueue_event, get_queue_depth, is_queue_enabled
+from ..metrics import record_duplicate, record_webhook_intake
+from ..queue import (
+    QueueUnavailableError,
+    enqueue_event,
+    get_queue_snapshot,
+    is_queue_enabled,
+    redrive_dead_letter,
+)
 from ..schemas import (
+    DLQRedriveOut,
     EventsListOut,
     EventsSummaryOut,
     QueueStatsOut,
@@ -37,10 +45,19 @@ router = APIRouter(tags=["webhooks"])
 
 
 async def _get_queue_depth_or_none() -> int | None:
-    if not is_queue_enabled():
-        return None
     try:
-        return await get_queue_depth()
+        snapshot = await get_queue_snapshot()
+        return snapshot.main_depth
+    except QueueUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Queue unavailable",
+        ) from exc
+
+
+async def _get_queue_snapshot_or_raise():
+    try:
+        return await get_queue_snapshot()
     except QueueUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -94,6 +111,8 @@ async def receive_webhook(
                 delivery_id,
                 str(existing.id),
             )
+            record_duplicate()
+            record_webhook_intake(data.source, "duplicate")
             return WebhookAccepted(
                 status="duplicate",
                 event_id=existing.id,
@@ -103,6 +122,7 @@ async def receive_webhook(
     event = await crud.create_event(
         session,
         delivery_id=delivery_id,
+        request_id=getattr(request.state, "request_id", None),
         source=data.source,
         event_type=data.event_type,
         payload=data.payload,
@@ -117,7 +137,8 @@ async def receive_webhook(
                 detail="Queue unavailable",
             ) from exc
     else:
-        background_tasks.add_task(process_event_by_id, event.id)
+        background_tasks.add_task(process_event_by_id, event.id, final_attempt=True)
+    record_webhook_intake(data.source, "accepted")
     return WebhookAccepted(
         status="accepted",
         event_id=event.id,
@@ -147,7 +168,10 @@ async def get_events(
 )
 async def get_events_summary(session: AsyncSession = Depends(get_session)) -> EventsSummaryOut:
     summary = await crud.get_events_summary(session)
-    summary["queue_depth"] = await _get_queue_depth_or_none()
+    snapshot = await _get_queue_snapshot_or_raise()
+    summary["queue_depth"] = snapshot.main_depth
+    summary["retry_depth"] = snapshot.retry_depth
+    summary["dead_letter_depth"] = snapshot.dead_letter_depth
     return EventsSummaryOut(**summary)
 
 
@@ -157,12 +181,20 @@ async def get_events_summary(session: AsyncSession = Depends(get_session)) -> Ev
     dependencies=[Depends(require_api_key)],
 )
 async def get_queue_stats() -> QueueStatsOut:
-    depth = await _get_queue_depth_or_none()
+    snapshot = await _get_queue_snapshot_or_raise()
     return QueueStatsOut(
         backend=settings.task_queue_backend,
         enabled=is_queue_enabled(),
         queue_name=settings.event_queue_name if is_queue_enabled() else None,
-        depth=depth,
+        depth=snapshot.main_depth,
+        retry_queue_name=(
+            settings.retry_queue_name if settings.task_queue_backend == "rabbitmq" else None
+        ),
+        retry_depth=snapshot.retry_depth,
+        dead_letter_queue_name=(
+            settings.dead_letter_queue_name if settings.task_queue_backend == "rabbitmq" else None
+        ),
+        dead_letter_depth=snapshot.dead_letter_depth,
     )
 
 
@@ -197,5 +229,20 @@ async def retry_event(
                 detail="Queue unavailable",
             ) from exc
     else:
-        background_tasks.add_task(process_event_by_id, event.id)
+        background_tasks.add_task(process_event_by_id, event.id, final_attempt=True)
     return RetryAccepted(event_id=event.id)
+
+
+@router.post(
+    "/queue/dlq/redrive",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=DLQRedriveOut,
+    dependencies=[Depends(require_api_key)],
+)
+async def redrive_dlq(
+    limit: int = Query(default=10, ge=1, le=100),
+    session: AsyncSession = Depends(get_session),
+) -> DLQRedriveOut:
+    redriven = await redrive_dead_letter(limit=limit)
+    await crud.mark_events_pending(session, event_ids=redriven)
+    return DLQRedriveOut(redriven_count=len(redriven), event_ids=redriven)
